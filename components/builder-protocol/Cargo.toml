@@ -1,8 +1,8 @@
 [package]
-name = "habitat_builder_protocol"
+name = "habitat-builder-protocol"
 version = "0.0.0"
 authors = ["Adam Jacob <adam@chef.io>", "Jamie Winsor <reset@chef.io>", "Fletcher Nichol <fnichol@chef.io>", "Joshua Timberman <joshua@chef.io>", "Dave Parfitt <dparfitt@chef.io>"]
-description = "Habitat-Builder Network Server Protocol"
+description = "Habitat Builder Network Server Protocol"
 build = "build.rs"
 workspace = "../../"
 
@@ -22,6 +22,4 @@ path = "../core"
 pkg-config = "0.3"
 
 [features]
-default = []
-functional = []
 protocols = []

@@ -14,6 +14,7 @@ doc = false
 clippy = {version = "*", optional = true}
 chrono = { version = "*", features = ["serde"] }
 env_logger = "*"
+habitat-builder-protocol = { path = "../builder-protocol" }
 git2 = "*"
 lazy_static = "*"
 log = "*"
@@ -41,9 +42,6 @@ path = "../net"
 
 [dependencies.habitat_depot_client]
 path = "../builder-depot-client"
-
-[dependencies.habitat_builder_protocol]
-path = "../builder-protocol"
 
 [features]
 default = []

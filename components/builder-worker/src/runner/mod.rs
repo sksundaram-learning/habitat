@@ -26,8 +26,8 @@ use std::str::FromStr;
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread::{self, JoinHandle};
 
-use bldr_core::logger::Logger;
 pub use protocol::jobsrv::JobState;
+use bldr_core::logger::Logger;
 use chrono::UTC;
 use depot_client;
 use hab_core::{crypto, env};
@@ -35,7 +35,7 @@ use hab_core::package::archive::PackageArchive;
 use hab_core::package::install::PackageInstall;
 use hab_core::package::PackageIdent;
 use hab_core::channel::bldr_channel_name;
-use hab_net::server::ZMQ_CONTEXT;
+use hab_net::socket::DEFAULT_CONTEXT;
 use protobuf::{parse_from_bytes, Message};
 use protocol::jobsrv as proto;
 use protocol::originsrv::OriginPackageIdent;
@@ -409,7 +409,7 @@ pub struct RunnerCli {
 impl RunnerCli {
     /// Create a new Job Runner client
     pub fn new() -> Self {
-        let sock = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER).unwrap();
+        let sock = (**DEFAULT_CONTEXT).as_mut().socket(zmq::DEALER).unwrap();
         RunnerCli {
             sock: sock,
             msg: zmq::Message::new().unwrap(),
@@ -482,7 +482,7 @@ impl RunnerMgr {
     }
 
     fn new(config: Arc<RwLock<Config>>) -> Result<Self> {
-        let sock = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER)?;
+        let sock = (**DEFAULT_CONTEXT).as_mut().socket(zmq::DEALER)?;
         Ok(RunnerMgr {
             sock: sock,
             msg: zmq::Message::new().unwrap(),

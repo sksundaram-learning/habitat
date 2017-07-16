@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Chef Software Inc. and/or applicable contributors
+// Copyright (c) 2016 Chef Software Inc. and/or applicable contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,26 +13,22 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
-use hab_net;
-use hab_net::server::{Application, Envelope, ZMQ_CONTEXT};
+use hab_net::server::{Application, Envelope};
+use hab_net::socket::DEFAULT_CONTEXT;
 use protobuf::{parse_from_bytes, Message};
 use protocol::{self, routesrv};
 use protocol::sharding::{ShardId, SHARD_COUNT};
 use protocol::net::{ErrCode, Protocol};
 use rand::{self, Rng};
-use zmq;
+use zmq::{self, Error as ZError};
 
 use config::Config;
 use error::{Error, Result};
 
-pub type ServerMap = HashMap<Protocol, HashMap<ShardId, hab_net::ServerReg>>;
-
 pub struct Server {
-    config: Arc<Mutex<Config>>,
-    fe_sock: zmq::Socket,
-    hb_sock: zmq::Socket,
+    config: Config,
+    socket: zmq::Socket,
     servers: ServerMap,
     state: SocketState,
     envelope: Envelope,
@@ -42,31 +38,17 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config) -> Self {
-        let fe_sock = (**ZMQ_CONTEXT).as_mut().socket(zmq::ROUTER).unwrap();
-        let hb_sock = (**ZMQ_CONTEXT).as_mut().socket(zmq::ROUTER).unwrap();
-        fe_sock.set_router_mandatory(true).unwrap();
-        hb_sock.set_router_mandatory(true).unwrap();
+        let socket = (**DEFAULT_CONTEXT).as_mut().socket(zmq::ROUTER).unwrap();
+        socket.set_router_mandatory(true).unwrap();
         Server {
-            config: Arc::new(Mutex::new(config)),
-            fe_sock: fe_sock,
-            hb_sock: hb_sock,
-            servers: ServerMap::new(),
+            config: config,
+            socket: socket,
+            servers: ServerMap::default(),
             state: SocketState::default(),
             envelope: Envelope::default(),
             req: zmq::Message::new().unwrap(),
             rng: rand::thread_rng(),
         }
-    }
-
-    pub fn reconfigure(&self, config: Config) -> Result<()> {
-        {
-            let mut cfg = self.config.lock().unwrap();
-            *cfg = config;
-        }
-        // obtain lock and replace our config
-        // notify datastore to refresh it's connection if it needs to
-        // notify sockets to reconnect if changes
-        Ok(())
     }
 
     fn process_frontend(&mut self) -> Result<()> {
@@ -78,7 +60,7 @@ impl Server {
                         self.state = SocketState::Cleaning;
                         continue;
                     }
-                    let hop = self.fe_sock.recv_msg(0)?;
+                    let hop = self.socket.recv_msg(0)?;
                     if self.envelope.hops().len() == 0 && hop.len() == 0 {
                         warn!("rejecting message, failed to receive identity frame from message");
                         self.state = SocketState::Cleaning;
@@ -94,7 +76,7 @@ impl Server {
                         self.state = SocketState::Cleaning;
                         continue;
                     }
-                    let hop = self.fe_sock.recv_msg(0)?;
+                    let hop = self.socket.recv_msg(0)?;
                     if hop.len() == 0 {
                         self.state = SocketState::Control;
                         continue;
@@ -103,7 +85,7 @@ impl Server {
                     self.envelope.add_hop(hop).unwrap();
                 }
                 SocketState::Control => {
-                    self.fe_sock.recv(&mut self.req, 0)?;
+                    self.socket.recv(&mut self.req, 0)?;
                     match self.req.as_str() {
                         Some("RP") => self.state = SocketState::Forwarding,
                         Some("RQ") => self.state = SocketState::Routing,
@@ -114,17 +96,17 @@ impl Server {
                     }
                 }
                 SocketState::Forwarding => {
-                    self.fe_sock.recv(&mut self.req, 0)?;
+                    self.socket.recv(&mut self.req, 0)?;
                     debug!("forwarding, msg={:?}", self.req.as_str());
                     for hop in &self.envelope.hops()[1..] {
-                        self.fe_sock.send(&*hop, zmq::SNDMORE).unwrap();
+                        self.socket.send(&*hop, zmq::SNDMORE).unwrap();
                     }
-                    self.fe_sock.send(&[], zmq::SNDMORE).unwrap();
-                    self.fe_sock.send(&*self.req, 0).unwrap();
+                    self.socket.send(&[], zmq::SNDMORE).unwrap();
+                    self.socket.send(&*self.req, 0).unwrap();
                     self.state = SocketState::Cleaning;
                 }
                 SocketState::Routing => {
-                    self.fe_sock.recv(&mut self.req, 0)?;
+                    self.socket.recv(&mut self.req, 0)?;
                     if self.req.len() == 0 {
                         warn!("rejecting message, failed to receive a message body");
                         self.state = SocketState::Cleaning;
@@ -165,35 +147,39 @@ impl Server {
     }
 
     fn process_heartbeat(&mut self) -> Result<()> {
-        self.hb_sock.recv(&mut self.req, 0)?;
-        match self.req.as_str() {
-            Some("") | None => return Ok(()),
-            Some("R") => (),
-            Some(ident) => {
-                self.hb_sock.send_str(ident, zmq::SNDMORE)?;
-                self.hb_sock.send(&[], zmq::SNDMORE)?;
-                self.hb_sock.send_str("REG", 0)?;
-                return Ok(());
+        self.socket.recv(&mut self.req, 0)?;
+        let cmd = self.req.as_str().unwrap_or("").to_string();
+        match cmd.as_ref() {
+            "" => return Ok(()),
+            "R" => {
+                // Registration
+                self.socket.recv(&mut self.req, 0)?;
+                let mut reg: routesrv::Registration = parse_from_bytes(&self.req)?;
+                debug!("received server reg, {:?}", reg);
+                if self.servers.add(
+                    reg.get_protocol(),
+                    reg.take_endpoint(),
+                    reg.take_shards(),
+                )
+                {
+                    self.socket.send_str("REGOK", 0)?;
+                } else {
+                    self.socket.send_str("REGCONFLICT", 0)?;
+                }
+            }
+            "P" => {
+                // Pulse
+                self.socket.recv(&mut self.req, 0)?;
+                // JW TODO: Don't unwrap this
+                self.servers.renew(self.req.as_str().unwrap());
+            }
+            ident => {
+                // New connection
+                self.socket.send_str(ident, zmq::SNDMORE)?;
+                self.socket.send(&[], zmq::SNDMORE)?;
+                self.socket.send_str("REG", 0)?;
             }
         }
-        self.hb_sock.recv(&mut self.req, 0)?;
-        // JW TODO: this data structure doesn't support a case where a shard *no longer* supports
-        // shards, it only allows for additions. We need to keep track of what any given server reg
-        // supports and then use the servers map as an index on top of that.
-        let registration: routesrv::Registration = parse_from_bytes(&self.req)?;
-        debug!("received server reg, {:?}", registration);
-        if !self.servers.contains_key(&registration.get_protocol()) {
-            self.servers.insert(
-                registration.get_protocol(),
-                HashMap::new(),
-            );
-        }
-        let shards = self.servers.get_mut(&registration.get_protocol()).unwrap();
-        for shard in registration.get_shards().iter() {
-            let server = hab_net::ServerReg::new(registration.get_endpoint().to_string());
-            shards.insert(*shard, server);
-        }
-        self.hb_sock.send_str("REGOK", 0)?;
         Ok(())
     }
 
@@ -203,25 +189,21 @@ impl Server {
 
     fn handle_message(&mut self) -> Result<()> {
         let msg = &self.envelope.msg;
-        debug!("handle-message, msg={:?}", &msg);
+        trace!("handle-message, msg={:?}", &msg);
         match self.envelope.message_id() {
             "Connect" => {
                 let req: routesrv::Connect = parse_from_bytes(msg.get_body()).unwrap();
-                debug!("Connect={:?}", req);
+                trace!("Connect={:?}", req);
                 let rep = protocol::Message::new(&routesrv::ConnectOk::new()).build();
-                self.fe_sock
-                    .send(&rep.write_to_bytes().unwrap(), 0)
-                    .unwrap();
+                self.socket.send(&rep.write_to_bytes().unwrap(), 0).unwrap();
             }
             "Disconnect" => {
                 let req: routesrv::Disconnect = parse_from_bytes(msg.get_body()).unwrap();
-                debug!("Disconnect={:?}", req);
-                // JW TODO: handle service disconnection messages
-            }
-            "Registration" => {
-                let req: routesrv::Registration = parse_from_bytes(msg.get_body()).unwrap();
-                debug!("Registration={:?}", req);
-                // JW TODO: handle service server registration update messages
+                trace!("Disconnect={:?}", req);
+                self.servers.drop(
+                    &self.envelope.protocol(),
+                    req.get_endpoint(),
+                );
             }
             id => warn!("Unknown message, msg={}", id),
         }
@@ -230,57 +212,38 @@ impl Server {
 
     fn route_message(&mut self) -> Result<()> {
         let shard = self.select_shard();
-        match self.servers.get(&self.envelope.protocol()) {
-            Some(shards) => {
-                match shards.get(&shard) {
-                    Some(server) => {
-                        debug!(
-                            "routing, srv={:?}, hops={:?}, msg={:?}",
-                            server.endpoint,
-                            self.envelope.hops().len(),
-                            self.envelope.msg
-                        );
-                        self.fe_sock.send_str(&server.endpoint, zmq::SNDMORE)?;
-                        for hop in self.envelope.hops() {
-                            self.fe_sock.send(&*hop, zmq::SNDMORE)?;
-                        }
-                        self.fe_sock.send(&[], zmq::SNDMORE)?;
-                        self.fe_sock.send(
-                            &self.envelope.msg.write_to_bytes().unwrap(),
-                            0,
-                        )?;
-                    }
-                    None => {
-                        warn!(
-                            "failed to route message, no server servicing shard, msg={:?}",
-                            self.envelope.msg
-                        );
-                        let err = protocol::Message::new(
-                            &protocol::net::err(ErrCode::NO_SHARD, "rt:route:1"),
-                        ).build();
-                        let bytes = err.write_to_bytes()?;
-                        for hop in self.envelope.hops() {
-                            self.fe_sock.send(&*hop, zmq::SNDMORE)?;
-                        }
-                        self.fe_sock.send(&[], zmq::SNDMORE)?;
-                        self.fe_sock.send(&bytes, 0)?;
-                    }
+        match self.servers.get(&self.envelope.protocol(), &shard) {
+            Some(server) => {
+                debug!(
+                    "routing, srv={:?}, hops={:?}, msg={:?}",
+                    server.endpoint,
+                    self.envelope.hops().len(),
+                    self.envelope.msg
+                );
+                self.socket.send_str(&server.endpoint, zmq::SNDMORE)?;
+                for hop in self.envelope.hops() {
+                    self.socket.send(&*hop, zmq::SNDMORE)?;
                 }
+                self.socket.send(&[], zmq::SNDMORE)?;
+                self.socket.send(
+                    &self.envelope.msg.write_to_bytes().unwrap(),
+                    0,
+                )?;
             }
             None => {
                 warn!(
-                    "failed to route message, no servers registered for protocol, msg={:?}",
+                    "failed to route message, no server servicing shard, msg={:?}",
                     self.envelope.msg
                 );
                 let err = protocol::Message::new(
-                    &protocol::net::err(ErrCode::NO_SHARD, "rt:route:2"),
+                    &protocol::net::err(ErrCode::NO_SHARD, "rt:route:1"),
                 ).build();
                 let bytes = err.write_to_bytes()?;
                 for hop in self.envelope.hops() {
-                    self.fe_sock.send(&*hop, zmq::SNDMORE)?;
+                    self.socket.send(&*hop, zmq::SNDMORE)?;
                 }
-                self.fe_sock.send(&[], zmq::SNDMORE)?;
-                self.fe_sock.send(&bytes, 0)?;
+                self.socket.send(&[], zmq::SNDMORE)?;
+                self.socket.send(&bytes, 0)?;
             }
         }
         Ok(())
@@ -293,49 +256,88 @@ impl Server {
             (self.rng.gen::<u64>() % SHARD_COUNT as u64) as u32
         }
     }
+
+    fn wait_recv(&self) -> RecvResult {
+        // JW TODO: figure out how long we should poll for
+        match self.socket.poll(zmq::POLLIN, -1) {
+            Ok(count) if count < 0 => unreachable!("zmq::poll, returned a negative count"),
+            Ok(count) => RecvResult::Continue(count as u32),
+            Err(ZError::EINTR) |
+            Err(ZError::ETERM) => RecvResult::Shutdown,
+            Err(ZError::EFAULT) => {
+                unreachable!("zmq::poll, the provided _items_ was not valid (NULL)")
+            }
+            Err(err) => unreachable!("zmq::poll, returned an unexpected error, {:?}", err),
+        }
+    }
 }
 
 impl Application for Server {
     type Error = Error;
 
     fn run(&mut self) -> Result<()> {
-        {
-            let cfg = self.config.lock().unwrap();
-            self.hb_sock.bind(&cfg.hb_addr())?;
-            self.fe_sock.bind(&cfg.fe_addr())?;
-            println!("Listening on ({})", cfg.fe_addr());
-            println!("Heartbeat on ({})", cfg.hb_addr());
-        }
+        self.socket.bind(&self.config.addr())?;
+        println!("Listening on ({})", self.config.addr());
         info!("builder-router is ready to go.");
-        let mut hb_msg = false;
-        let mut fe_msg = false;
         loop {
-            {
-                let mut items = [self.hb_sock.as_poll_item(1), self.fe_sock.as_poll_item(1)];
-                // Poll until a message is received on either socket. Checking for the zmq::POLLIN
-                // flag on a poll item's revents will let you know if you have received a message
-                // or not on that socket.
-                // JW TODO: Implement service heartbeat and expiration
-                debug!("waiting for message");
-                zmq::poll(&mut items, -1)?;
-                if (items[0].get_revents() & zmq::POLLIN) > 0 {
-                    hb_msg = true;
+            trace!("waiting for message");
+            match self.wait_recv() {
+                RecvResult::Continue(count) => {
+                    trace!("processing {}, messages", count);
+                    trace!("processing front-end");
+                    self.process_frontend()?;
                 }
-                if (items[1].get_revents() & zmq::POLLIN) > 0 {
-                    fe_msg = true;
+                RecvResult::Shutdown => {
+                    info!("received shutdown signal, shutting down...");
+                    break;
                 }
             }
-            if hb_msg {
-                debug!("processing heartbeat");
-                self.process_heartbeat()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ServerMap(HashMap<Protocol, HashMap<ShardId, hab_net::ServerReg>>);
+
+impl ServerMap {
+    pub fn add(&mut self, protocol: Protocol, netid: String, shards: Vec<ShardId>) -> bool {
+        if !self.0.contains_key(&protocol) {
+            self.0.insert(protocol, HashMap::default());
+        }
+        let registrations = self.0.get_mut(&protocol).unwrap();
+        for shard in shards.iter() {
+            if let Some(reg) = registrations.get(&shard) {
+                if &reg.endpoint != &netid {
+                    return false;
+                }
             }
-            if fe_msg {
-                debug!("processing front-end");
-                self.process_frontend()?;
+        }
+        let registration = hab_net::ServerReg::new(netid);
+        for shard in shards {
+            registrations.insert(shard, registration.clone());
+        }
+        true
+    }
+
+    pub fn drop(&mut self, protocol: &Protocol, netid: &str) {
+        if let Some(map) = self.0.get_mut(protocol) {
+            map.retain(|_, reg| reg.endpoint != netid);
+        }
+    }
+
+    pub fn get(&self, protocol: &Protocol, shard: &ShardId) -> Option<&hab_net::ServerReg> {
+        self.0.get(protocol).and_then(|shards| shards.get(shard))
+    }
+
+    pub fn renew(&mut self, netid: &str) {
+        // JW TODO: We can't iterate like this every heartbeat
+        for registrations in self.0.values_mut() {
+            for registration in registrations.values_mut() {
+                if registration.endpoint == netid {
+                    registration.renew();
+                }
             }
-            debug!("done processing");
-            hb_msg = false;
-            fe_msg = false;
         }
     }
 }
@@ -357,4 +359,9 @@ impl Default for SocketState {
 
 pub fn run(config: Config) -> Result<()> {
     Server::new(config).run()
+}
+
+enum RecvResult {
+    Continue(u32),
+    Shutdown,
 }

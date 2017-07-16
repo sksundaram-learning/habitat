@@ -23,7 +23,6 @@ extern crate habitat_core as hab_core;
 extern crate log;
 
 use std::process;
-use std::str::FromStr;
 
 use hab_core::config::ConfigFile;
 use router::{Config, Error, Result};
@@ -54,9 +53,7 @@ fn app<'a, 'b>() -> clap::App<'a, 'b> {
         (@subcommand start =>
             (about: "Run a Habitat-Builder router")
             (@arg config: -c --config +takes_value
-                "Filepath to configuration file. \
-                [default: /hab/svc/builder-router/config.toml]")
-            (@arg port: --port +takes_value "Listen port. [default: 5560]")
+                "Filepath to configuration file. [default: /hab/svc/builder-router/config.toml]")
         )
     )
 }
@@ -64,15 +61,10 @@ fn app<'a, 'b>() -> clap::App<'a, 'b> {
 fn config_from_args(matches: &clap::ArgMatches) -> Result<Config> {
     let cmd = matches.subcommand_name().unwrap();
     let args = matches.subcommand_matches(cmd).unwrap();
-    let mut config = match args.value_of("config") {
+    let config = match args.value_of("config") {
         Some(cfg_path) => Config::from_file(cfg_path)?,
         None => Config::from_file(CFG_DEFAULT_PATH).unwrap_or(Config::default()),
     };
-    if let Some(port) = args.value_of("port") {
-        if u16::from_str(port).map(|p| config.client_port = p).is_err() {
-            return Err(Error::BadPort(port.to_string()));
-        }
-    }
     Ok(config)
 }
 

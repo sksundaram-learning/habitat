@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #![cfg_attr(feature="clippy", feature(plugin))]
 #![cfg_attr(feature="clippy", plugin(clippy))]
 
@@ -39,21 +40,19 @@ extern crate time;
 extern crate unicase;
 extern crate zmq;
 
+pub mod application;
 pub mod config;
 pub mod error;
-pub mod dispatcher;
 pub mod http;
 pub mod oauth;
 pub mod privilege;
 pub mod routing;
-pub mod server;
-pub mod supervisor;
+pub mod socket;
 
 use std::process::Command;
 
+pub use self::application::Application;
 pub use self::error::{Error, Result};
-pub use self::server::{Application, ServerReg};
-pub use self::supervisor::Supervisor;
 
 pub fn hostname() -> Result<String> {
     let output = Command::new("sh")

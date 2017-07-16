@@ -14,6 +14,7 @@ doc = false
 clippy = {version = "*", optional = true}
 aws-sdk-rust = "*"
 env_logger = "*"
+habitat-builder-protocol = { path = "../builder-protocol" }
 linked-hash-map = "*"
 log = "*"
 protobuf = "*"
@@ -34,9 +35,6 @@ features = [ "suggestions", "color", "unstable" ]
 
 [dependencies.habitat_core]
 path = "../core"
-
-[dependencies.habitat_builder_protocol]
-path = "../builder-protocol"
 
 [dependencies.habitat_net]
 path = "../net"

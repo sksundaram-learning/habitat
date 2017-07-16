@@ -29,7 +29,7 @@ use serde_json;
 
 use super::net_err_to_http;
 use super::super::error::Error;
-use super::super::routing::{Broker, BrokerConn};
+use super::super::routing::{RouteBroker, RouteConn};
 use super::super::oauth::github::GitHubClient;
 use config;
 use privilege::FeatureFlags;
@@ -74,16 +74,16 @@ impl Key for GitHubCli {
     type Value = GitHubClient;
 }
 
-pub struct RouteBroker;
+pub struct XRouteBroker;
 
-impl Key for RouteBroker {
-    type Value = BrokerConn;
+impl Key for XRouteBroker {
+    type Value = RouteConn;
 }
 
-impl BeforeMiddleware for RouteBroker {
+impl BeforeMiddleware for XRouteBroker {
     fn before(&self, req: &mut Request) -> IronResult<()> {
-        let conn = Broker::connect().unwrap();
-        req.extensions.insert::<RouteBroker>(conn);
+        let conn = RouteBroker::connect().unwrap();
+        req.extensions.insert::<XRouteBroker>(conn);
         Ok(())
     }
 }
@@ -111,7 +111,7 @@ impl Authenticated {
         self
     }
 
-    fn authenticate(&self, conn: &mut BrokerConn, token: &str) -> IronResult<Session> {
+    fn authenticate(&self, conn: &mut RouteConn, token: &str) -> IronResult<Session> {
         let mut request = SessionGet::new();
         request.set_token(token.to_string());
         match conn.route::<SessionGet, Session>(&request) {
@@ -144,10 +144,10 @@ impl BeforeMiddleware for Authenticated {
         let session = {
             match req.headers.get::<Authorization<Bearer>>() {
                 Some(&Authorization(Bearer { ref token })) => {
-                    match req.extensions.get_mut::<RouteBroker>() {
+                    match req.extensions.get_mut::<XRouteBroker>() {
                         Some(broker) => self.authenticate(broker, token)?,
                         None => {
-                            let mut broker = Broker::connect().unwrap();
+                            let mut broker = RouteBroker::connect().unwrap();
                             self.authenticate(&mut broker, token)?
                         }
                     }
@@ -207,7 +207,7 @@ pub fn session_create(github: &GitHubClient, token: &str) -> IronResult<Session>
                 )
             }
         };
-        let mut conn = Broker::connect().unwrap();
+        let mut conn = RouteBroker::connect().unwrap();
         match conn.route::<SessionCreate, Session>(&request) {
             Ok(session) => return Ok(session),
             Err(err) => {
@@ -237,7 +237,7 @@ pub fn session_create(github: &GitHubClient, token: &str) -> IronResult<Session>
                     return Err(IronError::new(err, (body, status)));
                 }
             };
-            let mut conn = Broker::connect().unwrap();
+            let mut conn = RouteBroker::connect().unwrap();
             let mut request = SessionCreate::new();
             request.set_token(token.to_string());
             request.set_extern_id(user.id);

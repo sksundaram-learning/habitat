@@ -28,46 +28,36 @@ use zmq;
 
 use config::{RouterAddr, ToAddrString};
 use error::{Error, Result};
-use server::ZMQ_CONTEXT;
+use socket::DEFAULT_CONTEXT;
 
 pub type RouteResult<T> = result::Result<T, NetError>;
 
-/// Time to wait before timing out a message receive for a `BrokerConn`.
+/// Time to wait before timing out a message receive for a `RouteConn`.
 pub const RECV_TIMEOUT_MS: i32 = 5_000;
-/// Time to wait before timing out a message send for a `Broker` to a router.
+/// Time to wait before timing out a message send for a `RouteBroker` to a router.
 pub const SEND_TIMEOUT_MS: i32 = 5_000;
-// ZeroMQ address for the application's Broker's queue.
+// ZeroMQ address for the application's RouteBroker's queue.
 const ROUTE_INPROC_ADDR: &'static str = "inproc://route-broker";
 
 /// Client connection for sending and receiving messages to and from the service cluster through
-/// a running `Broker`.
-pub struct BrokerConn {
+/// a running `RouteBroker`.
+pub struct RouteConn {
     sock: zmq::Socket,
 }
 
-impl BrokerConn {
-    /// Create a new `BrokerConn`
+impl RouteConn {
+    /// Create a new `RouteConn`
     ///
     /// # Errors
     ///
     /// * Socket could not be created
     /// * Socket could not be configured
-    pub fn new() -> Result<Self> {
-        let socket = (**ZMQ_CONTEXT).as_mut().socket(zmq::REQ)?;
+    fn new() -> Result<Self> {
+        let socket = (**DEFAULT_CONTEXT).as_mut().socket(zmq::REQ)?;
         socket.set_rcvtimeo(RECV_TIMEOUT_MS)?;
         socket.set_sndtimeo(SEND_TIMEOUT_MS)?;
         socket.set_immediate(true)?;
-        Ok(BrokerConn { sock: socket })
-    }
-
-    /// Connect to a running `Broker` with the given ZeroMQ address.
-    ///
-    /// # Errors
-    ///
-    /// * A connection cannot be established to a socket at the given address
-    pub fn connect(&mut self, addr: &str) -> Result<()> {
-        self.sock.connect(addr)?;
-        Ok(())
+        Ok(RouteConn { sock: socket })
     }
 
     /// Routes a message to the connected broker, through a router, and to appropriate service,
@@ -75,12 +65,16 @@ impl BrokerConn {
     ///
     /// # Errors
     ///
-    /// * One or more message frames cannot be sent to the Broker's queue
+    /// * One or more message frames cannot be sent to the RouteBroker's queue
     ///
     /// # Panics
     ///
     /// * Could not serialize message
-    pub fn route<M: Routable, R: protobuf::MessageStatic>(&mut self, msg: &M) -> RouteResult<R> {
+    pub fn route<M, R>(&mut self, msg: &M) -> RouteResult<R>
+    where
+        M: Routable,
+        R: protobuf::MessageStatic,
+    {
         if self.route_async(msg).is_err() {
             return Err(protocol::net::err(ErrCode::ZMQ, "net:route:1"));
         }
@@ -117,12 +111,15 @@ impl BrokerConn {
     ///
     /// # Errors
     ///
-    /// * One or more message frames cannot be sent to the Broker's queue
+    /// * One or more message frames cannot be sent to the RouteBroker's queue
     ///
     /// # Panics
     ///
     /// * Could not serialize message
-    pub fn route_async<M: Routable>(&mut self, msg: &M) -> Result<()> {
+    pub fn route_async<M>(&mut self, msg: &M) -> Result<()>
+    where
+        M: Routable,
+    {
         let route_hash = msg.route_key().map(
             |key| key.hash(&mut FnvHasher::default()),
         );
@@ -133,29 +130,40 @@ impl BrokerConn {
         Ok(())
     }
 
+    /// Connect to a running `RouteBroker` with the given ZeroMQ address.
+    ///
+    /// # Errors
+    ///
+    /// * A connection cannot be established to a socket at the given address
+    fn connect(&mut self, addr: &str) -> Result<()> {
+        self.sock.connect(addr)?;
+        Ok(())
+    }
+
     /// Receives a message from the connected broker. This function will block the calling thread
     /// until a message is received or a timeout occurs.
     ///
     /// # Errors
     ///
-    /// * `Broker` Queue became unavailable
+    /// * `RouteBroker` Queue became unavailable
     /// * Message was not received within the timeout
     /// * Received an unparseable message
-    pub fn recv(&mut self) -> Result<protocol::net::Msg> {
+    fn recv(&mut self) -> Result<protocol::net::Msg> {
         let envelope = self.sock.recv_msg(0)?;
         let msg: protocol::net::Msg = parse_from_bytes(&envelope)?;
         Ok(msg)
     }
 }
 
-/// A messaging Broker for proxying messages from clients to one or more `RouteSrv` and vice versa.
-pub struct Broker {
+/// A messaging RouteBroker for proxying messages from clients to one or more `RouteSrv` and vice
+/// versa.
+pub struct RouteBroker {
     client_sock: zmq::Socket,
     router_sock: zmq::Socket,
 }
 
-impl Broker {
-    /// Create a new `Broker`
+impl RouteBroker {
+    /// Create a new `RouteBroker`
     ///
     /// # Errors
     ///
@@ -166,40 +174,41 @@ impl Broker {
     ///
     /// * Could not read `zmq::Context` due to deadlock or poisoning
     fn new(net_ident: String) -> Result<Self> {
-        let fe = (**ZMQ_CONTEXT).as_mut().socket(zmq::ROUTER)?;
-        let be = (**ZMQ_CONTEXT).as_mut().socket(zmq::DEALER)?;
+        let fe = (**DEFAULT_CONTEXT).as_mut().socket(zmq::ROUTER)?;
+        let be = (**DEFAULT_CONTEXT).as_mut().socket(zmq::DEALER)?;
         fe.set_identity(net_ident.as_bytes())?;
         be.set_rcvtimeo(RECV_TIMEOUT_MS)?;
         be.set_sndtimeo(SEND_TIMEOUT_MS)?;
         be.set_immediate(true)?;
-        Ok(Broker {
+        Ok(RouteBroker {
             client_sock: fe,
             router_sock: be,
         })
     }
 
-    /// Helper function for creating a new `BrokerConn` and connecting to the application's `Broker`
+    /// Helper function for creating a new `RouteConn` and connecting to the application's
+    /// `RouteBroker`
     ///
     /// # Errors
     ///
-    /// * Could not connect to `Broker`
+    /// * Could not connect to `RouteBroker`
     /// * Could not create socket
     ///
     /// # Panics
     ///
     /// * Could not read `zmq::Context` due to deadlock or poisoning
-    pub fn connect() -> Result<BrokerConn> {
-        let mut conn = BrokerConn::new()?;
+    pub fn connect() -> Result<RouteConn> {
+        let mut conn = RouteConn::new()?;
         conn.connect(ROUTE_INPROC_ADDR)?;
         Ok(conn)
     }
 
-    /// Create a new `Broker` and run it in a separate thread. This function will block the calling
-    /// thread until the new broker has successfully started.
+    /// Create a new `RouteBroker` and run it in a separate thread. This function will block the
+    /// calling thread until the new broker has successfully started.
     ///
     /// # Panics
     ///
-    /// * Broker crashed during startup
+    /// * RouteBroker crashed during startup
     pub fn run(net_ident: String, routers: &Vec<RouterAddr>) -> JoinHandle<()> {
         let (tx, rx) = mpsc::sync_channel(1);
         let addrs = routers.iter().map(|a| a.to_addr_string()).collect();
@@ -216,7 +225,7 @@ impl Broker {
         }
     }
 
-    // Main loop for `Broker`.
+    // Main loop for `RouteBroker`.
     //
     // Binds front-end socket to ZeroMQ inproc address and connects to all routers. Sends a message
     // back to the caller over the given rendezvous channel to signal when ready.

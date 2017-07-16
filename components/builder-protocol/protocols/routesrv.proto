@@ -6,10 +6,18 @@ message Connect {
 }
 
 message ConnectOk {}
-message Disconnect {}
+
+message Disconnect {
+  optional net.Protocol protocol = 1;
+  optional string endpoint = 2;
+}
 
 message Registration {
   optional net.Protocol protocol = 1;
   optional string endpoint = 2;
   repeated uint32 shards = 3 [packed=true];
+}
+
+message Heartbeat {
+  optional string endpoint = 1;
 }

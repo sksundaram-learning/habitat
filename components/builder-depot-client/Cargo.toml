@@ -8,6 +8,7 @@ workspace = "../../"
 [dependencies]
 clippy = {version = "*", optional = true}
 broadcast = "*"
+habitat-builder-protocol = { path = "../builder-protocol" }
 hyper = "*"
 hyper-openssl = ""
 log = "*"
@@ -19,9 +20,6 @@ serde_derive = "*"
 serde_json = "*"
 tee = "*"
 url = "*"
-
-[dependencies.habitat_builder_protocol]
-path = "../builder-protocol"
 
 [dependencies.habitat_core]
 path = "../core"
