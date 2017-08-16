@@ -1,0 +1,23 @@
+---
+sidebar_links:
+- title: Build Your Web App with Habitat
+  links:
+  - title: Introduction
+    link: /tutorials/build-your-own/
+    sub_links:
+    - title: Create Your Plan
+      link: /tutorials/build-your-own/create-plan/
+    - title: Define Dependencies and Callbacks
+      link: /tutorials/build-your-own/define-dependencies-callbacks/
+    - title: Define Hooks
+      link: /tutorials/build-your-own/define-hooks/
+    - title: Customize Configuration
+      link: /tutorials/build-your-own/define-config/
+    - title: Connect to Database
+      link: /tutorials/build-your-own/connect-database/
+    - title: Connect to Nginx
+      link: /tutorials/build-your-own/connect-nginx/
+    - title: Build and Test
+      link: /tutorials/build-your-own/build-test/
+  - title: Next Steps
+    link: /tutorials/build-your-own/next-steps/
